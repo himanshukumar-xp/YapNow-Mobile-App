@@ -10,10 +10,14 @@ import {
   Platform,
   Alert,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { COLORS } from '../theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Haptics from 'expo-haptics';
+import { COLORS, RADIUS, SHADOWS } from '../theme';
 import ChatBubble from '../components/ChatBubble';
 import IcebreakerCard from '../components/IcebreakerCard';
+import Avatar from '../components/Avatar';
+import TypingIndicator from '../components/TypingIndicator';
+import ScreenHeader from '../components/ScreenHeader';
 import { useUser } from '../context/UserContext';
 import { getIcebreakerList, getMockReply } from '../utils/icebreakers';
 import { loadMessages, saveMessages } from '../utils/storage';
@@ -28,16 +32,20 @@ function fmtTime(ts) {
   return `${h}:${m} ${ampm}`;
 }
 
-export default function ChatScreen({ navigation }) {
+export default function ChatScreen({ navigation, route }) {
+  const insets = useSafeAreaInsets();
   const { user, activeMatch, setActiveMatch, deviceId } = useUser();
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [typing, setTyping] = useState(false);
   const [iceIndex, setIceIndex] = useState(0);
+  const [showSparks, setShowSparks] = useState(false);
   const [roomInfo, setRoomInfo] = useState(null);
   const [netError, setNetError] = useState('');
+
   const listRef = useRef(null);
   const replyTimer = useRef(null);
+  const initialHandled = useRef(false);
 
   const isRemote = !!activeMatch?.isRemote;
   const roomCode = activeMatch?.roomCode || '';
@@ -51,13 +59,21 @@ export default function ChatScreen({ navigation }) {
 
   const current = starters.length ? starters[iceIndex % starters.length] : null;
 
-  // Remote peer name from room members (updates when partner joins)
+  // Remote peer name from room members
   const remotePeerName = useMemo(() => {
     if (!isRemote) return activeMatch?.peer?.name;
     const others = (roomInfo?.members || []).filter((m) => m.deviceId !== deviceId);
     if (others.length > 0) return others.map((m) => m.name).join(', ');
     return activeMatch?.peer?.name || 'Waiting for partner…';
   }, [isRemote, roomInfo, deviceId, activeMatch]);
+
+  // Handle initial message from MatchScreen
+  useEffect(() => {
+    if (route?.params?.initialMessage && !initialHandled.current) {
+      initialHandled.current = true;
+      send(route.params.initialMessage);
+    }
+  }, [route?.params]);
 
   // Mock mode: load from AsyncStorage
   useEffect(() => {
@@ -76,7 +92,6 @@ export default function ChatScreen({ navigation }) {
       (room) => {
         setRoomInfo(room);
         if (room && room.members) {
-          // Keep peer display fresh
           const others = room.members.filter((m) => m.deviceId !== deviceId);
           if (others.length > 0) {
             setActiveMatch((prev) =>
@@ -86,42 +101,49 @@ export default function ChatScreen({ navigation }) {
             );
           }
         }
-        // If incoming call ringing, prompt to jump to Call screen
+        // Incoming call alert
         if (room && room.call && room.call.state === 'ringing' && room.call.byDeviceId !== deviceId) {
-          Alert.alert('Incoming call', `${room.call.byName || 'Partner'} is calling…`, [
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+          Alert.alert('Incoming Call 📞', `${room.call.byName || 'Partner'} is calling you…`, [
             {
-              text: 'Accept',
+              text: 'Accept Call',
               onPress: () => navigation.navigate('Call'),
             },
-            { text: 'Later', style: 'cancel' },
+            { text: 'Decline', style: 'cancel' },
           ]);
         }
       },
-      () => setNetError('Could not sync room. Check internet / Firestore enabled.')
+      () => setNetError('Could not sync room. Check connection.')
     );
+
     const unsubMsgs = subscribeMessages(
       roomCode,
       (list) => {
         setMessages(list);
         setNetError('');
       },
-      () => setNetError('Could not load messages. Check internet / Firestore rules.')
+      () => setNetError('Could not load messages.')
     );
+
     return () => {
       unsubRoom();
       unsubMsgs();
     };
   }, [isRemote, roomCode]);
 
-  useEffect(() => {
-    const title = isRemote ? `Room ${roomCode} · ${remotePeerName}` : activeMatch?.peer?.name || 'Chat';
-    navigation.setOptions({ title });
-  }, [activeMatch, isRemote, roomCode, remotePeerName]);
-
   if (!user || !activeMatch) {
     return (
-      <View style={styles.empty}>
-        <Text>No active chat.</Text>
+      <View style={styles.emptyWrap}>
+        <ScreenHeader title="Chat" onBack={() => navigation.navigate('Home')} />
+        <View style={styles.emptyContent}>
+          <Text style={styles.emptyText}>No active conversation found.</Text>
+          <TouchableOpacity
+            style={styles.backHomeBtn}
+            onPress={() => navigation.navigate('Home')}
+          >
+            <Text style={styles.backHomeBtnText}>Back to Home</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   }
@@ -135,12 +157,14 @@ export default function ChatScreen({ navigation }) {
     const text = (textOverride ?? input).trim();
     if (!text) return;
 
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+
     if (isRemote) {
       setInput('');
       try {
         await sendRoomMessage({ code: roomCode, deviceId, name: user.name, text });
       } catch (e) {
-        Alert.alert('Send failed', e.message || 'Check internet / Firestore rules.');
+        Alert.alert('Message failed', e.message || 'Check connection.');
       }
       return;
     }
@@ -151,6 +175,7 @@ export default function ChatScreen({ navigation }) {
     persistMock(next);
     setInput('');
     setTyping(true);
+
     replyTimer.current = setTimeout(() => {
       const reply = {
         id: `r${Date.now()}`,
@@ -160,114 +185,399 @@ export default function ChatScreen({ navigation }) {
       };
       persistMock([...next, reply]);
       setTyping(false);
-    }, 1400);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    }, 1300);
   };
 
   const useIcebreaker = () => {
-    if (current) send(current.text);
+    if (current) {
+      send(current.text);
+      setShowSparks(false);
+    }
   };
 
   const myIdForBubble = isRemote ? deviceId : 'me';
+  const peerDisplay = isRemote ? remotePeerName : activeMatch.peer.name;
 
   return (
-    <SafeAreaView style={styles.wrap} edges={['bottom']}>
+    <View style={styles.container}>
+      {/* Top Header with Avatar and Call Button */}
+      <ScreenHeader
+        onBack={() => navigation.goBack()}
+        centerContent={
+          <View style={styles.headerCenter}>
+            <Avatar
+              name={peerDisplay}
+              color={activeMatch.peer?.color || COLORS.primary}
+              size={34}
+              showStatus
+              isOnline
+            />
+            <View style={styles.headerTextWrap}>
+              <Text style={styles.headerName} numberOfLines={1}>
+                {peerDisplay}
+              </Text>
+              <Text style={styles.headerSubtitle} numberOfLines={1}>
+                {isRemote ? `Room ${roomCode}` : 'Active now'}
+              </Text>
+            </View>
+          </View>
+        }
+        rightAction={
+          <TouchableOpacity
+            style={styles.callHeaderBtn}
+            onPress={() => navigation.navigate('Call')}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.callHeaderIcon}>📞</Text>
+          </TouchableOpacity>
+        }
+      />
+
+      {/* Remote Room Info Banner */}
+      {isRemote && (
+        <View style={styles.roomBanner}>
+          <Text style={styles.roomBannerText}>
+            🔑 Room {roomCode} · 2-Phone Realtime Mode
+          </Text>
+          {netError ? <Text style={styles.netErrorText}>{netError}</Text> : null}
+        </View>
+      )}
+
+      {/* Collapsible AI Sparks Drawer */}
+      {showSparks && current && (
+        <View style={styles.sparksDrawer}>
+          <IcebreakerCard
+            item={current}
+            onUse={useIcebreaker}
+            onShuffle={() => setIceIndex((i) => i + 1)}
+            compact
+          />
+        </View>
+      )}
+
+      {/* Message Viewport */}
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={90}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
       >
-        {isRemote && (
-          <View style={styles.roomBanner}>
-            <Text style={styles.roomBannerText}>
-              🔑 Room {roomCode} · You are {user.name} · Talking to: {remotePeerName}
-            </Text>
-            {netError ? <Text style={styles.netError}>{netError}</Text> : null}
-          </View>
-        )}
-        <IcebreakerCard
-          item={current}
-          onUse={useIcebreaker}
-          onShuffle={() => setIceIndex((i) => i + 1)}
-        />
         <FlatList
           ref={listRef}
           data={messages}
           keyExtractor={(m) => m.id}
-          style={{ flex: 1 }}
-          contentContainerStyle={{ paddingVertical: 8, flexGrow: 1 }}
+          style={styles.list}
+          contentContainerStyle={[
+            styles.listContent,
+            messages.length === 0 && styles.listContentEmpty,
+          ]}
+          showsVerticalScrollIndicator={false}
           ListEmptyComponent={
             <View style={styles.emptyChat}>
-              <Text style={styles.emptyChatText}>
-                {isRemote
-                  ? `Share code ${roomCode} with the other phone, then say hi! 👋`
-                  : `Say hi to ${activeMatch.peer.name}! 👋\nTry the AI starter above.`}
+              <View style={styles.emptyAvatarBadge}>
+                <Avatar
+                  name={peerDisplay}
+                  color={activeMatch.peer?.color || COLORS.primary}
+                  size={64}
+                />
+              </View>
+              <Text style={styles.emptyChatTitle}>
+                Say hello to {peerDisplay}! 👋
               </Text>
+              <Text style={styles.emptyChatSubtitle}>
+                {isRemote
+                  ? `Both devices in room ${roomCode} can chat and voice call in realtime.`
+                  : 'Start the conversation with an AI prompt or your own greeting.'}
+              </Text>
+
+              {current && (
+                <TouchableOpacity
+                  style={styles.starterPill}
+                  onPress={useIcebreaker}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.starterPillLabel}>✨ Tap to send starter:</Text>
+                  <Text style={styles.starterPillText} numberOfLines={2}>
+                    “{current.text}”
+                  </Text>
+                </TouchableOpacity>
+              )}
             </View>
           }
-          renderItem={({ item }) => (
-            <ChatBubble
-              mine={item.senderId === myIdForBubble}
-              text={item.senderId === myIdForBubble ? item.text : `${item.senderName || ''}: ${item.text}`}
-              time={fmtTime(item.ts)}
-            />
-          )}
+          renderItem={({ item }) => {
+            const isMine = item.senderId === myIdForBubble;
+            return (
+              <ChatBubble
+                mine={isMine}
+                senderName={!isMine && isRemote ? item.senderName : undefined}
+                text={item.text}
+                time={fmtTime(item.ts)}
+              />
+            );
+          }}
           onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
           ListFooterComponent={
-            !isRemote && typing ? (
-              <Text style={styles.typing}>{activeMatch.peer.name} is typing…</Text>
-            ) : null
+            !isRemote && typing ? <TypingIndicator /> : null
           }
         />
-        <View style={styles.bar}>
+
+        {/* AI Sparks Pill Toggle */}
+        <View style={styles.sparksToggleRow}>
+          <TouchableOpacity
+            style={[styles.sparksToggle, showSparks && styles.sparksToggleActive]}
+            onPress={() => setShowSparks((prev) => !prev)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.sparksToggleIcon}>✨</Text>
+            <Text style={styles.sparksToggleText}>
+              {showSparks ? 'Hide AI Sparks' : 'AI Sparks Starter'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Bottom Message Input Bar */}
+        <View
+          style={[
+            styles.inputBar,
+            { paddingBottom: Math.max(insets.bottom, 10) },
+          ]}
+        >
           <TextInput
-            style={styles.input}
-            placeholder={isRemote ? `Message Room ${roomCode}...` : `Message ${activeMatch.peer.name}...`}
+            style={styles.textInput}
+            placeholder={
+              isRemote
+                ? `Message room ${roomCode}...`
+                : `Message ${peerDisplay}...`
+            }
+            placeholderTextColor={COLORS.textMuted}
             value={input}
             onChangeText={setInput}
             onSubmitEditing={() => send()}
             returnKeyType="send"
+            multiline={false}
           />
-          <TouchableOpacity style={styles.send} onPress={() => send()}>
-            <Text style={styles.sendText}>Send</Text>
+
+          <TouchableOpacity
+            style={[
+              styles.sendButton,
+              input.trim().length > 0 ? styles.sendButtonActive : styles.sendButtonInactive,
+            ]}
+            onPress={() => send()}
+            disabled={input.trim().length === 0}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.sendButtonIcon}>↑</Text>
           </TouchableOpacity>
         </View>
-        <TouchableOpacity onPress={() => navigation.navigate('Call')} style={styles.callLink}>
-          <Text style={styles.callLinkText}>📞 Switch to voice call instead?</Text>
-        </TouchableOpacity>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  wrap: { flex: 1, backgroundColor: COLORS.bg },
-  empty: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  roomBanner: { backgroundColor: '#EFF6FF', padding: 10, borderBottomWidth: 1, borderBottomColor: '#BFDBFE' },
-  roomBannerText: { textAlign: 'center', fontWeight: '800', color: COLORS.primaryDark, fontSize: 12 },
-  netError: { textAlign: 'center', color: '#E11D48', fontSize: 11, marginTop: 4 },
-  emptyChat: { alignItems: 'center', padding: 30 },
-  emptyChatText: { color: COLORS.muted, textAlign: 'center', lineHeight: 22, fontWeight: '600' },
-  typing: { color: COLORS.muted, fontStyle: 'italic', paddingHorizontal: 18, paddingVertical: 6, fontSize: 12 },
-  bar: { flexDirection: 'row', padding: 12, backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: COLORS.border },
-  input: {
+  container: {
     flex: 1,
     backgroundColor: COLORS.bg,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 11,
+  },
+  headerCenter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  headerTextWrap: {
+    marginLeft: 10,
+  },
+  headerName: {
     fontSize: 15,
+    fontWeight: '800',
+    color: COLORS.text,
+    maxWidth: 160,
+  },
+  headerSubtitle: {
+    fontSize: 11,
+    color: COLORS.success,
+    fontWeight: '600',
+    marginTop: 1,
+  },
+  callHeaderBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: COLORS.primaryLight,
+    borderWidth: 1,
+    borderColor: COLORS.primaryBorder,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  callHeaderIcon: {
+    fontSize: 16,
+  },
+  roomBanner: {
+    backgroundColor: '#EFF6FF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#BFDBFE',
+    paddingVertical: 7,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+  },
+  roomBannerText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.primaryDark,
+  },
+  netErrorText: {
+    fontSize: 11,
+    color: COLORS.danger,
+    marginTop: 2,
+  },
+  sparksDrawer: {
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  list: {
+    flex: 1,
+  },
+  listContent: {
+    paddingVertical: 12,
+  },
+  listContentEmpty: {
+    flexGrow: 1,
+    justifyContent: 'center',
+  },
+  emptyChat: {
+    alignItems: 'center',
+    paddingHorizontal: 28,
+    paddingVertical: 32,
+  },
+  emptyAvatarBadge: {
+    marginBottom: 16,
+  },
+  emptyChatTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: COLORS.text,
+    marginBottom: 6,
+  },
+  emptyChatSubtitle: {
+    fontSize: 13,
+    color: COLORS.muted,
+    textAlign: 'center',
+    lineHeight: 19,
+    marginBottom: 20,
+  },
+  starterPill: {
+    backgroundColor: '#F5F3FF',
+    borderWidth: 1,
+    borderColor: '#DDD6FE',
+    borderRadius: RADIUS.lg,
+    padding: 14,
+    width: '100%',
+    ...SHADOWS.sm,
+  },
+  starterPillLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: COLORS.primary,
+    marginBottom: 4,
+  },
+  starterPillText: {
+    fontSize: 13,
+    color: COLORS.text,
+    fontStyle: 'italic',
+    lineHeight: 18,
+  },
+  sparksToggleRow: {
+    paddingHorizontal: 16,
+    paddingBottom: 6,
+    alignItems: 'flex-start',
+  },
+  sparksToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
     borderWidth: 1,
     borderColor: COLORS.border,
+    paddingVertical: 5,
+    paddingHorizontal: 11,
+    borderRadius: RADIUS.full,
+    ...SHADOWS.sm,
+  },
+  sparksToggleActive: {
+    backgroundColor: COLORS.primaryLight,
+    borderColor: COLORS.primaryBorder,
+  },
+  sparksToggleIcon: {
+    fontSize: 11,
+    marginRight: 5,
+  },
+  sparksToggleText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+  inputBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    paddingHorizontal: 14,
+    paddingTop: 10,
+  },
+  textInput: {
+    flex: 1,
+    height: 44,
+    backgroundColor: COLORS.surfaceSubtle,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: RADIUS.full,
+    paddingHorizontal: 16,
+    fontSize: 15,
     color: COLORS.text,
   },
-  send: {
-    backgroundColor: COLORS.primary,
-    borderRadius: 14,
-    paddingHorizontal: 18,
+  sendButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
     justifyContent: 'center',
     marginLeft: 8,
   },
-  sendText: { color: '#fff', fontWeight: '800' },
-  callLink: { alignItems: 'center', paddingVertical: 8, backgroundColor: '#fff' },
-  callLinkText: { color: COLORS.primary, fontWeight: '700', fontSize: 13 },
+  sendButtonActive: {
+    backgroundColor: COLORS.primary,
+  },
+  sendButtonInactive: {
+    backgroundColor: COLORS.border,
+  },
+  sendButtonIcon: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '900',
+    marginTop: -2,
+  },
+  emptyWrap: {
+    flex: 1,
+    backgroundColor: COLORS.bg,
+  },
+  emptyContent: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  emptyText: {
+    fontSize: 15,
+    color: COLORS.muted,
+  },
+  backHomeBtn: {
+    backgroundColor: COLORS.primary,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: RADIUS.md,
+    marginTop: 14,
+  },
+  backHomeBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
 });

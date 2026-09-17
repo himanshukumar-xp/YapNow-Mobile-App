@@ -17,25 +17,20 @@ export default function AppNavigator() {
       <Stack.Navigator
         initialRouteName="Splash"
         screenOptions={{
-          headerStyle: { backgroundColor: COLORS.bg },
-          headerTintColor: COLORS.text,
-          headerTitleStyle: { fontWeight: '800' },
+          headerShown: false,
           contentStyle: { backgroundColor: COLORS.bg },
+          animation: 'slide_from_right',
         }}
       >
-        <Stack.Screen name="Splash" component={SplashScreen} options={{ headerShown: false }} />
-        <Stack.Screen
-          name="Onboarding"
-          component={OnboardingScreen}
-          options={{ title: 'Your Profile' }}
-        />
-        <Stack.Screen name="Home" component={HomeScreen} options={{ title: 'YapNow', headerBackVisible: false }} />
-        <Stack.Screen name="Match" component={MatchScreen} options={{ title: 'New Connection' }} />
+        <Stack.Screen name="Splash" component={SplashScreen} />
+        <Stack.Screen name="Onboarding" component={OnboardingScreen} />
+        <Stack.Screen name="Home" component={HomeScreen} />
+        <Stack.Screen name="Match" component={MatchScreen} />
         <Stack.Screen name="Chat" component={ChatScreen} />
         <Stack.Screen
           name="Call"
           component={CallScreen}
-          options={{ title: 'Voice Call', headerStyle: { backgroundColor: '#191932' }, headerTintColor: '#fff' }}
+          options={{ animation: 'fade_from_bottom' }}
         />
       </Stack.Navigator>
     </NavigationContainer>
